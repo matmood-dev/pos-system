@@ -1,0 +1,548 @@
+import express, { Request, Response } from 'express';
+import { query, getClient } from '../config/database.js';
+import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+import { validateOrderCreation, validateOrderUpdate, validateIdParam, handleValidationErrors } from '../validators/index.js';
+import { Order, CreateOrderRequest, UpdateOrderRequest, ApiResponse, OrderItem } from '../types/index.js';
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * /api/orders:
+ *   get:
+ *     summary: Get all orders
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of orders retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Order'
+ *       403:
+ *         description: Admin access required
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/', authenticateToken, requireAdmin, async (req: Request, res: Response): Promise<void> => {
+  try {
+    // Get orders with customer info
+    const ordersResult = await query(`
+      SELECT o.orderid, o.customerid, o.total_amount, o.status, o.created_at, o.updated_at,
+             c.name as customer_name, c.email as customer_email, c.phone as customer_phone
+      FROM orders o
+      LEFT JOIN customers c ON o.customerid = c.customerid
+      ORDER BY o.created_at DESC
+    `);
+
+    // Get order items for each order
+    const ordersWithItems = await Promise.all(
+      ordersResult.rows.map(async (order: any) => {
+        const itemsResult = await query(`
+          SELECT oi.itemid, oi.quantity, oi.price, i.name, i.category
+          FROM order_items oi
+          JOIN items i ON oi.itemid = i.itemid
+          WHERE oi.orderid = $1
+        `, [order.orderid]);
+
+        return {
+          ...order,
+          items: itemsResult.rows.map((item: any) => ({
+            itemid: item.itemid,
+            quantity: item.quantity,
+            price: parseFloat(item.price),
+            name: item.name,
+            category: item.category
+          }))
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      data: ordersWithItems as Order[]
+    });
+  } catch (error) {
+    console.error('Get orders error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve orders'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/orders/{orderid}:
+ *   get:
+ *     summary: Get an order by ID
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderid
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Order ID
+ *     responses:
+ *       200:
+ *         description: Order retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   $ref: '#/components/schemas/Order'
+ *       403:
+ *         description: Access denied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Order not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/:orderid', authenticateToken, requireAdmin, validateIdParam, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { orderid } = req.params;
+
+    // Get order with customer info
+    const orderResult = await query(`
+      SELECT o.orderid, o.customerid, o.total_amount, o.status, o.created_at, o.updated_at,
+             c.name as customer_name, c.email as customer_email, c.phone as customer_phone
+      FROM orders o
+      LEFT JOIN customers c ON o.customerid = c.customerid
+      WHERE o.orderid = $1
+    `, [orderid]);
+
+    if (orderResult.rows.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+      return;
+    }
+
+    // Get order items
+    const itemsResult = await query(`
+      SELECT oi.itemid, oi.quantity, oi.price, i.name, i.category
+      FROM order_items oi
+      JOIN items i ON oi.itemid = i.itemid
+      WHERE oi.orderid = $1
+    `, [orderid]);
+
+    const order = {
+      ...orderResult.rows[0],
+      items: itemsResult.rows.map((item: any) => ({
+        itemid: item.itemid,
+        quantity: item.quantity,
+        price: parseFloat(item.price),
+        name: item.name,
+        category: item.category
+      }))
+    };
+
+    res.json({
+      success: true,
+      data: order as Order
+    });
+  } catch (error) {
+    console.error('Get order error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve order'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/orders:
+ *   post:
+ *     summary: Create a new order
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - items
+ *             properties:
+ *               customerid:
+ *                 type: integer
+ *                 description: Customer ID (optional)
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required:
+ *                     - itemid
+ *                     - quantity
+ *                   properties:
+ *                     itemid:
+ *                       type: integer
+ *                       description: Item ID
+ *                     quantity:
+ *                       type: integer
+ *                       description: Quantity ordered
+ *     responses:
+ *       201:
+ *         description: Order created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Order created successfully"
+ *                 data:
+ *                   $ref: '#/components/schemas/Order'
+ *       400:
+ *         description: Validation error or insufficient stock
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/', authenticateToken, requireAdmin, validateOrderCreation, handleValidationErrors, async (req: Request, res: Response): Promise<void> => {
+  const client = await getClient();
+
+  try {
+    await client.query('BEGIN');
+
+    const { customerid, items }: CreateOrderRequest = req.body;
+
+    // Validate items exist and have sufficient stock
+    for (const item of items) {
+      const itemResult = await client.query(`
+        SELECT itemid, name, price, stock_quantity
+        FROM items
+        WHERE itemid = $1
+      `, [item.itemid]);
+
+      if (itemResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          success: false,
+          message: `Item with ID ${item.itemid} not found`
+        });
+        return;
+      }
+
+      if (itemResult.rows[0].stock_quantity < item.quantity) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          success: false,
+          message: `Insufficient stock for item: ${itemResult.rows[0].name}`
+        });
+        return;
+      }
+    }
+
+    // Calculate total amount
+    let totalAmount = 0;
+    const orderItemsWithPrices: OrderItem[] = [];
+
+    for (const item of items) {
+      const itemResult = await client.query(`
+        SELECT price FROM items WHERE itemid = $1
+      `, [item.itemid]);
+
+      const price = parseFloat(itemResult.rows[0].price);
+      totalAmount += price * item.quantity;
+
+      orderItemsWithPrices.push({
+        itemid: item.itemid,
+        quantity: item.quantity,
+        price: price
+      });
+    }
+
+    // Create order
+    const orderResult = await client.query(`
+      INSERT INTO orders (customerid, total_amount, status)
+      VALUES ($1, $2, 'pending')
+      RETURNING orderid, customerid, total_amount, status, created_at, updated_at
+    `, [customerid, totalAmount]);
+
+    const newOrder = orderResult.rows[0];
+
+    // Create order items and update stock
+    for (const item of orderItemsWithPrices) {
+      await client.query(`
+        INSERT INTO order_items (orderid, itemid, quantity, price)
+        VALUES ($1, $2, $3, $4)
+      `, [newOrder.orderid, item.itemid, item.quantity, item.price]);
+
+      // Update stock quantity
+      await client.query(`
+        UPDATE items
+        SET stock_quantity = stock_quantity - $1, updated_at = CURRENT_TIMESTAMP
+        WHERE itemid = $2
+      `, [item.quantity, item.itemid]);
+    }
+
+    await client.query('COMMIT');
+
+    // Get complete order with items for response
+    const completeOrder = {
+      ...newOrder,
+      items: orderItemsWithPrices
+    };
+
+    res.status(201).json({
+      success: true,
+      message: 'Order created successfully',
+      data: completeOrder as Order
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Create order error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create order'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * @swagger
+ * /api/orders/{orderid}:
+ *   put:
+ *     summary: Update an order status
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderid
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Order ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - status
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [pending, completed, cancelled]
+ *                 description: Order status
+ *     responses:
+ *       200:
+ *         description: Order updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Order updated successfully"
+ *                 data:
+ *                   $ref: '#/components/schemas/Order'
+ *       403:
+ *         description: Access denied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Order not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.put('/:orderid', authenticateToken, requireAdmin, validateIdParam, validateOrderUpdate, handleValidationErrors, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { orderid } = req.params;
+    const { status }: UpdateOrderRequest = req.body;
+
+    const result = await query(`
+      UPDATE orders
+      SET status = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE orderid = $2
+      RETURNING orderid, customerid, total_amount, status, created_at, updated_at
+    `, [status, orderid]);
+
+    if (result.rows.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+      return;
+    }
+
+    // Get order items for complete response
+    const itemsResult = await query(`
+      SELECT oi.itemid, oi.quantity, oi.price, i.name, i.category
+      FROM order_items oi
+      JOIN items i ON oi.itemid = i.itemid
+      WHERE oi.orderid = $1
+    `, [orderid]);
+
+    const order = {
+      ...result.rows[0],
+      items: itemsResult.rows.map((item: any) => ({
+        itemid: item.itemid,
+        quantity: item.quantity,
+        price: parseFloat(item.price),
+        name: item.name,
+        category: item.category
+      }))
+    };
+
+    res.json({
+      success: true,
+      message: 'Order updated successfully',
+      data: order as Order
+    });
+  } catch (error) {
+    console.error('Update order error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update order'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/orders/{orderid}:
+ *   delete:
+ *     summary: Delete an order
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderid
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Order ID
+ *     responses:
+ *       200:
+ *         description: Order deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Order deleted successfully"
+ *       403:
+ *         description: Admin access required
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Order not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.delete('/:orderid', authenticateToken, requireAdmin, validateIdParam, async (req: Request, res: Response): Promise<void> => {
+  const client = await getClient();
+
+  try {
+    await client.query('BEGIN');
+
+    const { orderid } = req.params;
+
+    // Get order items before deletion to restore stock
+    const itemsResult = await client.query(`
+      SELECT itemid, quantity FROM order_items WHERE orderid = $1
+    `, [orderid]);
+
+    // Restore stock quantities
+    for (const item of itemsResult.rows) {
+      await client.query(`
+        UPDATE items
+        SET stock_quantity = stock_quantity + $1, updated_at = CURRENT_TIMESTAMP
+        WHERE itemid = $2
+      `, [item.quantity, item.itemid]);
+    }
+
+    // Delete order (cascade will delete order_items)
+    const result = await client.query(`
+      DELETE FROM orders
+      WHERE orderid = $1
+      RETURNING orderid
+    `, [orderid]);
+
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+      return;
+    }
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Order deleted successfully'
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Delete order error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete order'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+export default router;
