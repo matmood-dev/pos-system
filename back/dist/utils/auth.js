@@ -34,7 +34,7 @@ export const generateRefreshToken = (user) => {
 // Verify user credentials
 export const authenticateUser = async (username, password) => {
     try {
-        const result = await query('SELECT userid, username, email, password, role, created_at, updated_at FROM users WHERE username = $1', [username]);
+        const result = await query('SELECT userid, username, email, password, role, created_at, updated_at FROM users WHERE username = ?', [username]);
         if (result.rows.length === 0) {
             return null;
         }
@@ -62,7 +62,7 @@ export const createDefaultAdmin = async () => {
         // Create default admin user
         const hashedPassword = await hashPassword('admin123');
         await query(`INSERT INTO users (username, email, role, password)
-       VALUES ($1, $2, $3, $4)`, ['admin', 'admin@pos.com', 'admin', hashedPassword]);
+       VALUES (?, ?, ?, ?)`, ['admin', 'admin@pos.com', 'admin', hashedPassword]);
         console.log('✅ Default admin user created:');
         console.log('   Username: admin');
         console.log('   Password: admin123');

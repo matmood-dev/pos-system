@@ -100,7 +100,7 @@ router.get('/:customerid', authenticateToken, requireAdmin, validateIdParam, asy
         const result = await query(`
       SELECT customerid, name, email, phone, address, created_at, updated_at
       FROM customers
-      WHERE customerid = $1
+      WHERE customerid = ?
     `, [customerid]);
         if (result.rows.length === 0) {
             res.status(404).json({
@@ -181,18 +181,23 @@ router.post('/', authenticateToken, requireAdmin, validateCustomerCreation, hand
         const { name, email, phone, address } = req.body;
         const result = await query(`
       INSERT INTO customers (name, email, phone, address)
-      VALUES ($1, $2, $3, $4)
-      RETURNING customerid, name, email, phone, address, created_at, updated_at
+      VALUES (?, ?, ?, ?)
     `, [name, email, phone, address]);
+        // Get the inserted customer
+        const customerResult = await query(`
+      SELECT customerid, name, email, phone, address, created_at, updated_at
+      FROM customers
+      WHERE customerid = LAST_INSERT_ID()
+    `);
         res.status(201).json({
             success: true,
             message: 'Customer created successfully',
-            data: result.rows[0]
+            data: customerResult.rows[0]
         });
     }
     catch (error) {
         console.error('Create customer error:', error);
-        if (error.code === '23505') { // Unique constraint violation
+        if (error.code === 'ER_DUP_ENTRY') { // Unique constraint violation
             res.status(400).json({
                 success: false,
                 message: 'Customer with this email or phone already exists'
@@ -309,9 +314,14 @@ router.put('/:customerid', authenticateToken, requireAdmin, validateIdParam, val
         const result = await query(`
       UPDATE customers
       SET ${updates.join(', ')}
-      WHERE customerid = $${paramCount}
-      RETURNING customerid, name, email, phone, address, created_at, updated_at
+      WHERE customerid = ?
     `, values);
+        // Get the updated customer
+        const customerResult = await query(`
+      SELECT customerid, name, email, phone, address, created_at, updated_at
+      FROM customers
+      WHERE customerid = ?
+    `, [customerid]);
         if (result.rows.length === 0) {
             res.status(404).json({
                 success: false,
@@ -322,12 +332,12 @@ router.put('/:customerid', authenticateToken, requireAdmin, validateIdParam, val
         res.json({
             success: true,
             message: 'Customer updated successfully',
-            data: result.rows[0]
+            data: customerResult.rows[0]
         });
     }
     catch (error) {
         console.error('Update customer error:', error);
-        if (error.code === '23505') { // Unique constraint violation
+        if (error.code === 'ER_DUP_ENTRY') { // Unique constraint violation
             res.status(400).json({
                 success: false,
                 message: 'Customer with this email or phone already exists'
@@ -387,10 +397,9 @@ router.delete('/:customerid', authenticateToken, requireAdmin, validateIdParam, 
         const { customerid } = req.params;
         const result = await query(`
       DELETE FROM customers
-      WHERE customerid = $1
-      RETURNING customerid
+      WHERE customerid = ?
     `, [customerid]);
-        if (result.rows.length === 0) {
+        if (result.rows.affectedRows === 0) {
             res.status(404).json({
                 success: false,
                 message: 'Customer not found'

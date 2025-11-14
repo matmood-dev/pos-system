@@ -106,7 +106,7 @@ router.get('/:userid', authenticateToken, requireAdminOrSelf, validateIdParam, a
     const result = await query(`
       SELECT userid, username, email, role, created_at, updated_at
       FROM users
-      WHERE userid = $1
+      WHERE userid = ?
     `, [userid]);
 
     if (result.rows.length === 0) {
@@ -194,19 +194,25 @@ router.post('/', authenticateToken, requireAdmin, validateUserCreation, handleVa
 
     const result = await query(`
       INSERT INTO users (username, email, role, password)
-      VALUES ($1, $2, $3, $4)
-      RETURNING userid, username, email, role, created_at, updated_at
+      VALUES (?, ?, ?, ?)
     `, [username, email, role || 'cashier', hashedPassword]);
+
+    // Get the inserted user
+    const userResult = await query(`
+      SELECT userid, username, email, role, created_at, updated_at
+      FROM users
+      WHERE userid = LAST_INSERT_ID()
+    `);
 
     res.status(201).json({
       success: true,
       message: 'User created successfully',
-      data: result.rows[0] as User
+      data: userResult.rows[0] as User
     });
   } catch (error) {
     console.error('Create user error:', error);
 
-    if ((error as any).code === '23505') { // Unique constraint violation
+    if ((error as any).code === 'ER_DUP_ENTRY') { // Unique constraint violation
       res.status(400).json({
         success: false,
         message: 'Username or email already exists'
@@ -294,31 +300,26 @@ router.put('/:userid', authenticateToken, requireAdminOrSelf, validateIdParam, v
     // Build dynamic update query
     const updates: string[] = [];
     const values: any[] = [];
-    let paramCount = 1;
 
     if (username !== undefined) {
-      updates.push(`username = $${paramCount}`);
+      updates.push(`username = ?`);
       values.push(username);
-      paramCount++;
     }
 
     if (email !== undefined) {
-      updates.push(`email = $${paramCount}`);
+      updates.push(`email = ?`);
       values.push(email);
-      paramCount++;
     }
 
     if (role !== undefined) {
-      updates.push(`role = $${paramCount}`);
+      updates.push(`role = ?`);
       values.push(role);
-      paramCount++;
     }
 
     if (password !== undefined) {
       const hashedPassword = await hashPassword(password);
-      updates.push(`password = $${paramCount}`);
+      updates.push(`password = ?`);
       values.push(hashedPassword);
-      paramCount++;
     }
 
     if (updates.length === 0) {
@@ -335,11 +336,17 @@ router.put('/:userid', authenticateToken, requireAdminOrSelf, validateIdParam, v
     const result = await query(`
       UPDATE users
       SET ${updates.join(', ')}
-      WHERE userid = $${paramCount}
-      RETURNING userid, username, email, role, created_at, updated_at
+      WHERE userid = ?
     `, values);
 
-    if (result.rows.length === 0) {
+    // Get the updated user
+    const userResult = await query(`
+      SELECT userid, username, email, role, created_at, updated_at
+      FROM users
+      WHERE userid = ?
+    `, [userid]);
+
+    if (result.rows.affectedRows === 0) {
       res.status(404).json({
         success: false,
         message: 'User not found'
@@ -350,12 +357,12 @@ router.put('/:userid', authenticateToken, requireAdminOrSelf, validateIdParam, v
     res.json({
       success: true,
       message: 'User updated successfully',
-      data: result.rows[0] as User
+      data: userResult.rows[0] as User
     });
   } catch (error) {
     console.error('Update user error:', error);
 
-    if ((error as any).code === '23505') { // Unique constraint violation
+    if ((error as any).code === 'ER_DUP_ENTRY') { // Unique constraint violation
       res.status(400).json({
         success: false,
         message: 'Username or email already exists'
@@ -418,11 +425,10 @@ router.delete('/:userid', authenticateToken, requireAdmin, validateIdParam, asyn
 
     const result = await query(`
       DELETE FROM users
-      WHERE userid = $1
-      RETURNING userid
+      WHERE userid = ?
     `, [userid]);
 
-    if (result.rows.length === 0) {
+    if (result.rows.affectedRows === 0) {
       res.status(404).json({
         success: false,
         message: 'User not found'

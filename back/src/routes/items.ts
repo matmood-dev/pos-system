@@ -41,12 +41,13 @@ router.get('/', authenticateToken, async (req: Request, res: Response): Promise<
     const values: any[] = [];
 
     if (category) {
-      queryText += ` AND category = $1`;
+      queryText += ` AND category = ?`;
       values.push(category);
     }
 
     if (search) {
-      queryText += ` AND (name ILIKE $2 OR description ILIKE $2)`;
+      queryText += ` AND (name LIKE ? OR description LIKE ?)`;
+      values.push(`%${search}%`);
       values.push(`%${search}%`);
     }
 
@@ -89,7 +90,7 @@ router.get('/:itemid', authenticateToken, validateIdParam, async (req: Request, 
     const result = await query(`
       SELECT itemid, name, description, price, category, stock_quantity, created_at, updated_at
       FROM items
-      WHERE itemid = $1
+      WHERE itemid = ?
     `, [itemid]);
 
     if (result.rows.length === 0) {
@@ -128,14 +129,20 @@ router.post('/', authenticateToken, requireAdmin, validateItemCreation, handleVa
 
     const result = await query(`
       INSERT INTO items (name, description, price, category, stock_quantity)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING itemid, name, description, price, category, stock_quantity, created_at, updated_at
+      VALUES (?, ?, ?, ?, ?)
     `, [name, description || null, price, category, stock_quantity]);
+
+    // Get the inserted item
+    const itemResult = await query(`
+      SELECT itemid, name, description, price, category, stock_quantity, created_at, updated_at
+      FROM items
+      WHERE itemid = LAST_INSERT_ID()
+    `);
 
     res.status(201).json({
       success: true,
       message: 'Item created successfully',
-      data: result.rows[0] as Item
+      data: itemResult.rows[0] as Item
     });
   } catch (error) {
     console.error('Create item error:', error);
@@ -162,36 +169,30 @@ router.put('/:itemid', authenticateToken, requireAdmin, validateIdParam, validat
 
     const updates: string[] = [];
     const values: any[] = [];
-    let paramCount = 1;
 
     if (name !== undefined) {
-      updates.push(`name = $${paramCount}`);
+      updates.push(`name = ?`);
       values.push(name);
-      paramCount++;
     }
 
     if (description !== undefined) {
-      updates.push(`description = $${paramCount}`);
+      updates.push(`description = ?`);
       values.push(description);
-      paramCount++;
     }
 
     if (price !== undefined) {
-      updates.push(`price = $${paramCount}`);
+      updates.push(`price = ?`);
       values.push(price);
-      paramCount++;
     }
 
     if (category !== undefined) {
-      updates.push(`category = $${paramCount}`);
+      updates.push(`category = ?`);
       values.push(category);
-      paramCount++;
     }
 
     if (stock_quantity !== undefined) {
-      updates.push(`stock_quantity = $${paramCount}`);
+      updates.push(`stock_quantity = ?`);
       values.push(stock_quantity);
-      paramCount++;
     }
 
     if (updates.length === 0) {
@@ -208,11 +209,17 @@ router.put('/:itemid', authenticateToken, requireAdmin, validateIdParam, validat
     const result = await query(`
       UPDATE items
       SET ${updates.join(', ')}
-      WHERE itemid = $${paramCount}
-      RETURNING itemid, name, description, price, category, stock_quantity, created_at, updated_at
+      WHERE itemid = ?
     `, values);
 
-    if (result.rows.length === 0) {
+    // Get the updated item
+    const itemResult = await query(`
+      SELECT itemid, name, description, price, category, stock_quantity, created_at, updated_at
+      FROM items
+      WHERE itemid = ?
+    `, [itemid]);
+
+    if (result.rows.affectedRows === 0) {
       res.status(404).json({
         success: false,
         message: 'Item not found'
@@ -223,7 +230,7 @@ router.put('/:itemid', authenticateToken, requireAdmin, validateIdParam, validat
     res.json({
       success: true,
       message: 'Item updated successfully',
-      data: result.rows[0] as Item
+      data: itemResult.rows[0] as Item
     });
   } catch (error) {
     console.error('Update item error:', error);
@@ -249,11 +256,10 @@ router.delete('/:itemid', authenticateToken, requireAdmin, validateIdParam, asyn
 
     const result = await query(`
       DELETE FROM items
-      WHERE itemid = $1
-      RETURNING itemid
+      WHERE itemid = ?
     `, [itemid]);
 
-    if (result.rows.length === 0) {
+    if (result.rows.affectedRows === 0) {
       res.status(404).json({
         success: false,
         message: 'Item not found'

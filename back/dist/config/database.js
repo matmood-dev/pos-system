@@ -1,25 +1,25 @@
-import pkg from 'pg';
-const { Pool } = pkg;
+import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 dotenv.config();
-const pool = new Pool({
+const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
+    port: parseInt(process.env.DB_PORT || '3306', 10),
     database: process.env.DB_NAME || 'pos_system',
-    user: process.env.DB_USER || 'postgres',
+    user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
-    max: 20, // Maximum number of clients in the pool
-    idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-    connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+    waitForConnections: true,
+    connectionLimit: 20,
+    queueLimit: 0,
+    connectTimeout: 60000,
 });
 // Test database connection
 export const connectDB = async () => {
     try {
-        const client = await pool.connect();
+        const connection = await pool.getConnection();
         console.log('✅ Database connected successfully');
         // Create tables if they don't exist
         await createTables();
-        client.release();
+        connection.release();
     }
     catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -29,72 +29,74 @@ export const connectDB = async () => {
 };
 // Create database tables
 const createTables = async () => {
-    const client = await pool.connect();
+    const connection = await pool.getConnection();
     try {
         // Create users table
-        await client.query(`
+        await connection.execute(`
       CREATE TABLE IF NOT EXISTS users (
-        userid SERIAL PRIMARY KEY,
+        userid INT AUTO_INCREMENT PRIMARY KEY,
         username VARCHAR(100) UNIQUE NOT NULL,
         email VARCHAR(100) UNIQUE NOT NULL,
-        role VARCHAR(50) NOT NULL DEFAULT 'cashier' CHECK (role IN ('admin', 'cashier')),
+        role ENUM('admin', 'cashier') NOT NULL DEFAULT 'cashier',
         password VARCHAR(255) NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
         // Create items table
-        await client.query(`
+        await connection.execute(`
       CREATE TABLE IF NOT EXISTS items (
-        itemid SERIAL PRIMARY KEY,
+        itemid INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         description TEXT,
         price DECIMAL(10,2) NOT NULL CHECK (price >= 0),
         category VARCHAR(50) NOT NULL,
-        stock_quantity INTEGER NOT NULL DEFAULT 0 CHECK (stock_quantity >= 0),
+        stock_quantity INT NOT NULL DEFAULT 0 CHECK (stock_quantity >= 0),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
         // Create customers table
-        await client.query(`
+        await connection.execute(`
       CREATE TABLE IF NOT EXISTS customers (
-        customerid SERIAL PRIMARY KEY,
+        customerid INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         email VARCHAR(100) UNIQUE,
         phone VARCHAR(20) UNIQUE NOT NULL,
         address TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
         // Create orders table
-        await client.query(`
+        await connection.execute(`
       CREATE TABLE IF NOT EXISTS orders (
-        orderid SERIAL PRIMARY KEY,
-        customerid INTEGER REFERENCES customers(customerid),
+        orderid INT AUTO_INCREMENT PRIMARY KEY,
+        customerid INT,
         total_amount DECIMAL(10,2) NOT NULL CHECK (total_amount >= 0),
-        status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'cancelled')),
+        status ENUM('pending', 'completed', 'cancelled') NOT NULL DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (customerid) REFERENCES customers(customerid)
       )
     `);
         // Create order_items table
-        await client.query(`
+        await connection.execute(`
       CREATE TABLE IF NOT EXISTS order_items (
-        order_itemid SERIAL PRIMARY KEY,
-        orderid INTEGER NOT NULL REFERENCES orders(orderid) ON DELETE CASCADE,
-        itemid INTEGER NOT NULL REFERENCES items(itemid),
-        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        order_itemid INT AUTO_INCREMENT PRIMARY KEY,
+        orderid INT NOT NULL,
+        itemid INT NOT NULL,
+        quantity INT NOT NULL CHECK (quantity > 0),
         price DECIMAL(10,2) NOT NULL CHECK (price >= 0),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (orderid) REFERENCES orders(orderid) ON DELETE CASCADE,
+        FOREIGN KEY (itemid) REFERENCES items(itemid)
       )
     `);
         // Create default admin user if not exists
-        await client.query(`
-      INSERT INTO users (username, email, role, password)
+        await connection.execute(`
+      INSERT IGNORE INTO users (username, email, role, password)
       VALUES ('admin', 'admin@pos.com', 'admin', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi')
-      ON CONFLICT (username) DO NOTHING
     `);
         console.log('✅ Database tables created/verified successfully');
     }
@@ -103,25 +105,25 @@ const createTables = async () => {
         throw error;
     }
     finally {
-        client.release();
+        connection.release();
     }
 };
 // Query helper functions
 export const query = async (text, params) => {
     const start = Date.now();
     try {
-        const res = await pool.query(text, params);
+        const [rows] = await pool.execute(text, params);
         const duration = Date.now() - start;
-        console.log('Executed query', { text, duration, rows: res.rowCount });
-        return res;
+        console.log('Executed query', { text, duration, rows: Array.isArray(rows) ? rows.length : 'N/A' });
+        return { rows };
     }
     catch (error) {
         console.error('Query error:', error);
         throw error;
     }
 };
-export const getClient = () => {
-    return pool.connect();
+export const getClient = async () => {
+    return await pool.getConnection();
 };
 export default pool;
 //# sourceMappingURL=database.js.map

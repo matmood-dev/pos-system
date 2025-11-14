@@ -43,7 +43,7 @@ export const generateRefreshToken = (user: User): string => {
 export const authenticateUser = async (username: string, password: string): Promise<User | null> => {
   try {
     const result = await query(
-      'SELECT userid, username, email, password, role, created_at, updated_at FROM users WHERE username = $1',
+      'SELECT userid, username, email, password, role, created_at, updated_at FROM users WHERE username = ?',
       [username]
     );
 
@@ -79,7 +79,7 @@ export const createDefaultAdmin = async (): Promise<void> => {
     const hashedPassword = await hashPassword('admin123');
     await query(
       `INSERT INTO users (username, email, role, password)
-       VALUES ($1, $2, $3, $4)`,
+       VALUES (?, ?, ?, ?)`,
       ['admin', 'admin@pos.com', 'admin', hashedPassword]
     );
 

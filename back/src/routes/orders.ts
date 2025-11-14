@@ -54,7 +54,7 @@ router.get('/', authenticateToken, requireAdmin, async (req: Request, res: Respo
           SELECT oi.itemid, oi.quantity, oi.price, i.name, i.category
           FROM order_items oi
           JOIN items i ON oi.itemid = i.itemid
-          WHERE oi.orderid = $1
+          WHERE oi.orderid = ?
         `, [order.orderid]);
 
         return {
@@ -134,7 +134,7 @@ router.get('/:orderid', authenticateToken, requireAdmin, validateIdParam, async 
              c.name as customer_name, c.email as customer_email, c.phone as customer_phone
       FROM orders o
       LEFT JOIN customers c ON o.customerid = c.customerid
-      WHERE o.orderid = $1
+      WHERE o.orderid = ?
     `, [orderid]);
 
     if (orderResult.rows.length === 0) {
@@ -150,7 +150,7 @@ router.get('/:orderid', authenticateToken, requireAdmin, validateIdParam, async 
       SELECT oi.itemid, oi.quantity, oi.price, i.name, i.category
       FROM order_items oi
       JOIN items i ON oi.itemid = i.itemid
-      WHERE oi.orderid = $1
+      WHERE oi.orderid = ?
     `, [orderid]);
 
     const order = {
@@ -238,20 +238,20 @@ router.post('/', authenticateToken, requireAdmin, validateOrderCreation, handleV
   const client = await getClient();
 
   try {
-    await client.query('BEGIN');
+    await client.execute('START TRANSACTION');
 
     const { customerid, items }: CreateOrderRequest = req.body;
 
     // Validate items exist and have sufficient stock
     for (const item of items) {
-      const itemResult = await client.query(`
+      const [itemRows] = await client.execute(`
         SELECT itemid, name, price, stock_quantity
         FROM items
-        WHERE itemid = $1
+        WHERE itemid = ?
       `, [item.itemid]);
 
-      if (itemResult.rows.length === 0) {
-        await client.query('ROLLBACK');
+      if ((itemRows as any[]).length === 0) {
+        await client.execute('ROLLBACK');
         res.status(400).json({
           success: false,
           message: `Item with ID ${item.itemid} not found`
@@ -259,11 +259,11 @@ router.post('/', authenticateToken, requireAdmin, validateOrderCreation, handleV
         return;
       }
 
-      if (itemResult.rows[0].stock_quantity < item.quantity) {
-        await client.query('ROLLBACK');
+      if ((itemRows as any[])[0].stock_quantity < item.quantity) {
+        await client.execute('ROLLBACK');
         res.status(400).json({
           success: false,
-          message: `Insufficient stock for item: ${itemResult.rows[0].name}`
+          message: `Insufficient stock for item: ${(itemRows as any[])[0].name}`
         });
         return;
       }
@@ -274,11 +274,11 @@ router.post('/', authenticateToken, requireAdmin, validateOrderCreation, handleV
     const orderItemsWithPrices: OrderItem[] = [];
 
     for (const item of items) {
-      const itemResult = await client.query(`
-        SELECT price FROM items WHERE itemid = $1
+      const [itemRows] = await client.execute(`
+        SELECT price FROM items WHERE itemid = ?
       `, [item.itemid]);
 
-      const price = parseFloat(itemResult.rows[0].price);
+      const price = parseFloat((itemRows as any[])[0].price);
       totalAmount += price * item.quantity;
 
       orderItemsWithPrices.push({
@@ -289,34 +289,41 @@ router.post('/', authenticateToken, requireAdmin, validateOrderCreation, handleV
     }
 
     // Create order
-    const orderResult = await client.query(`
+    await client.execute(`
       INSERT INTO orders (customerid, total_amount, status)
-      VALUES ($1, $2, 'pending')
-      RETURNING orderid, customerid, total_amount, status, created_at, updated_at
+      VALUES (?, ?, 'pending')
     `, [customerid, totalAmount]);
 
-    const newOrder = orderResult.rows[0];
+    // Get the inserted order ID
+    const [orderIdResult] = await client.execute('SELECT LAST_INSERT_ID() as orderid');
+    const newOrderId = (orderIdResult as any[])[0].orderid;
 
     // Create order items and update stock
     for (const item of orderItemsWithPrices) {
-      await client.query(`
+      await client.execute(`
         INSERT INTO order_items (orderid, itemid, quantity, price)
-        VALUES ($1, $2, $3, $4)
-      `, [newOrder.orderid, item.itemid, item.quantity, item.price]);
+        VALUES (?, ?, ?, ?)
+      `, [newOrderId, item.itemid, item.quantity, item.price]);
 
       // Update stock quantity
-      await client.query(`
+      await client.execute(`
         UPDATE items
-        SET stock_quantity = stock_quantity - $1, updated_at = CURRENT_TIMESTAMP
-        WHERE itemid = $2
+        SET stock_quantity = stock_quantity - ?, updated_at = CURRENT_TIMESTAMP
+        WHERE itemid = ?
       `, [item.quantity, item.itemid]);
     }
 
-    await client.query('COMMIT');
+    await client.execute('COMMIT');
 
     // Get complete order with items for response
+    const [orderRows] = await client.execute(`
+      SELECT orderid, customerid, total_amount, status, created_at, updated_at
+      FROM orders
+      WHERE orderid = ?
+    `, [newOrderId]);
+
     const completeOrder = {
-      ...newOrder,
+      ...(orderRows as any[])[0],
       items: orderItemsWithPrices
     };
 
@@ -326,7 +333,7 @@ router.post('/', authenticateToken, requireAdmin, validateOrderCreation, handleV
       data: completeOrder as Order
     });
   } catch (error) {
-    await client.query('ROLLBACK');
+    await client.execute('ROLLBACK');
     console.error('Create order error:', error);
     res.status(500).json({
       success: false,
@@ -401,12 +408,11 @@ router.put('/:orderid', authenticateToken, requireAdmin, validateIdParam, valida
 
     const result = await query(`
       UPDATE orders
-      SET status = $1, updated_at = CURRENT_TIMESTAMP
-      WHERE orderid = $2
-      RETURNING orderid, customerid, total_amount, status, created_at, updated_at
+      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE orderid = ?
     `, [status, orderid]);
 
-    if (result.rows.length === 0) {
+    if (result.rows.affectedRows === 0) {
       res.status(404).json({
         success: false,
         message: 'Order not found'
@@ -414,16 +420,23 @@ router.put('/:orderid', authenticateToken, requireAdmin, validateIdParam, valida
       return;
     }
 
+    // Get updated order
+    const [orderRows] = await (await getClient()).execute(`
+      SELECT orderid, customerid, total_amount, status, created_at, updated_at
+      FROM orders
+      WHERE orderid = ?
+    `, [orderid]);
+
     // Get order items for complete response
     const itemsResult = await query(`
       SELECT oi.itemid, oi.quantity, oi.price, i.name, i.category
       FROM order_items oi
       JOIN items i ON oi.itemid = i.itemid
-      WHERE oi.orderid = $1
+      WHERE oi.orderid = ?
     `, [orderid]);
 
     const order = {
-      ...result.rows[0],
+      ...(orderRows as any[])[0],
       items: itemsResult.rows.map((item: any) => ({
         itemid: item.itemid,
         quantity: item.quantity,
@@ -493,33 +506,32 @@ router.delete('/:orderid', authenticateToken, requireAdmin, validateIdParam, asy
   const client = await getClient();
 
   try {
-    await client.query('BEGIN');
+    await client.execute('START TRANSACTION');
 
     const { orderid } = req.params;
 
     // Get order items before deletion to restore stock
-    const itemsResult = await client.query(`
-      SELECT itemid, quantity FROM order_items WHERE orderid = $1
+    const [itemsRows] = await client.execute(`
+      SELECT itemid, quantity FROM order_items WHERE orderid = ?
     `, [orderid]);
 
     // Restore stock quantities
-    for (const item of itemsResult.rows) {
-      await client.query(`
+    for (const item of (itemsRows as any[])) {
+      await client.execute(`
         UPDATE items
-        SET stock_quantity = stock_quantity + $1, updated_at = CURRENT_TIMESTAMP
-        WHERE itemid = $2
+        SET stock_quantity = stock_quantity + ?, updated_at = CURRENT_TIMESTAMP
+        WHERE itemid = ?
       `, [item.quantity, item.itemid]);
     }
 
     // Delete order (cascade will delete order_items)
-    const result = await client.query(`
+    const [result] = await client.execute(`
       DELETE FROM orders
-      WHERE orderid = $1
-      RETURNING orderid
+      WHERE orderid = ?
     `, [orderid]);
 
-    if (result.rows.length === 0) {
-      await client.query('ROLLBACK');
+    if ((result as any).affectedRows === 0) {
+      await client.execute('ROLLBACK');
       res.status(404).json({
         success: false,
         message: 'Order not found'
@@ -527,14 +539,14 @@ router.delete('/:orderid', authenticateToken, requireAdmin, validateIdParam, asy
       return;
     }
 
-    await client.query('COMMIT');
+    await client.execute('COMMIT');
 
     res.json({
       success: true,
       message: 'Order deleted successfully'
     });
   } catch (error) {
-    await client.query('ROLLBACK');
+    await client.execute('ROLLBACK');
     console.error('Delete order error:', error);
     res.status(500).json({
       success: false,
